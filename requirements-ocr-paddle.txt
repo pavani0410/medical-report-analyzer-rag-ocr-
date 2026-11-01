@@ -1,0 +1,4 @@
+-r requirements-ocr.txt
+# Optional legacy backend: set OCR_BACKEND=paddle to use these packages.
+paddleocr>=3.0,<4
+paddlepaddle>=3.0,<4

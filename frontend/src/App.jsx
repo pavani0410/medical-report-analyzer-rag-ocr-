@@ -1,11 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Stethoscope, Shield, Brain, Sparkles, Zap, UploadCloud, MessageSquare } from 'lucide-react';
 import './index.css'; // This line now imports all your consolidated CSS
+import { waitForUpload } from './uploadProgress';
 
 export default function App() {
     const [selectedFile, setSelectedFile] = useState(null);
+    const [extractionMode, setExtractionMode] = useState('auto');
     const [uploadStatus, setUploadStatus] = useState('');
-    const [isUploading, setIsUploading] = useState(false);
+    const [isUploading, setIsUploading] = useState(true);
+    const [review, setReview] = useState(null);
+    const [reviewText, setReviewText] = useState('');
+    const [reportReady, setReportReady] = useState(false);
+    const [sourceUrl, setSourceUrl] = useState('');
+    const sourceRef = useRef('');
+    useEffect(() => () => { if (sourceRef.current) URL.revokeObjectURL(sourceRef.current); }, []);
     const [question, setQuestion] = useState('');
     const [chatMessages, setChatMessages] = useState([]);
     const [isAsking, setIsAsking] = useState(false);
@@ -13,7 +21,41 @@ export default function App() {
 
     // Add initial welcome message
     useEffect(() => {
-        setChatMessages([{ type: 'ai', text: 'Welcome! Upload a medical PDF to get started, or ask a general medical question.' }]);
+        setChatMessages([{ type: 'ai', text: 'Welcome! Upload a lab report PDF or photo to get started.' }]);
+    }, []);
+
+    // Reconnect to the session's existing job after a refresh, without reuploading.
+    useEffect(() => {
+        const controller = new AbortController();
+        const restore = async () => {
+            try {
+                const response = await fetch('/upload-status', { signal: controller.signal });
+                if (!response.ok) throw new Error('Could not restore upload status. Refresh to retry.');
+                const status = await response.json();
+                if (status.state === 'ready') {
+                    setReportReady(true);
+                    setUploadStatus({ message: 'Your report is ready. You can ask questions.', type: 'success' });
+                    return;
+                }
+                if (status.state === 'idle') return;
+                if (status.state === 'failed') throw new Error(status.error || 'The previous upload failed.');
+                setUploadStatus({ message: 'Reconnecting to your previous upload...', type: 'info' });
+                const result = status.state === 'done' ? status.result : await waitForUpload(
+                    status.job_id, message => setUploadStatus({ message, type: 'info' }), controller.signal);
+                if (controller.signal.aborted) return;
+                setUploadStatus({ message: result.message, type: 'success' });
+                if (result.requires_review) {
+                    setReview(result);
+                    setReviewText(result.text);
+                } else setReportReady(true);
+            } catch (error) {
+                if (!controller.signal.aborted) setUploadStatus({ message: error.message, type: 'error' });
+            } finally {
+                if (!controller.signal.aborted) setIsUploading(false);
+            }
+        };
+        restore();
+        return () => controller.abort();
     }, []);
 
     // Scroll to bottom of chat box whenever messages change
@@ -25,47 +67,90 @@ export default function App() {
 
     const handleFileChange = (event) => {
         setSelectedFile(event.target.files[0]);
+        setReview(null);
+        setReportReady(false);
         setUploadStatus('');
     };
 
     const handleUpload = async (event) => {
         event.preventDefault();
         if (!selectedFile) {
-            setUploadStatus({ message: 'Please select a PDF file to upload.', type: 'error' });
+            setUploadStatus({ message: 'Please select a PDF, PNG, or JPEG report.', type: 'error' });
             return;
         }
 
         setIsUploading(true);
-        setUploadStatus({ message: 'Uploading and processing PDF...', type: 'info' });
+        setReportReady(false);
+        setReview(null);
+        if (sourceRef.current) URL.revokeObjectURL(sourceRef.current);
+        sourceRef.current = URL.createObjectURL(selectedFile);
+        setSourceUrl(sourceRef.current);
+        setUploadStatus({ message: 'Reading report; the first scan may take longer while OCR models load...', type: 'info' });
 
         const formData = new FormData();
         formData.append('file', selectedFile);
+        formData.append('extraction_mode', extractionMode);
 
         try {
-            const response = await fetch('/upload', {
+            const response = await fetch('/upload?async=1', {
                 method: 'POST',
                 body: formData,
             });
 
-            const result = await response.json();
+            let result = await response.json();
+            const reconnecting = response.status === 409 && result.job_id;
+            if (reconnecting) {
+                // The server is reading the previous upload, not this selected file.
+                if (sourceRef.current) URL.revokeObjectURL(sourceRef.current);
+                sourceRef.current = '';
+                setSourceUrl('');
+                setUploadStatus({ message: 'Your previous upload is still running. Reconnecting...', type: 'info' });
+            }
+            if ((response.status === 202 || reconnecting) && result.job_id) {
+                result = await waitForUpload(result.job_id, message => setUploadStatus({ message, type: 'info' }));
+            }
 
-            if (response.ok) {
+            if (response.ok || reconnecting) {
                 setUploadStatus({ message: result.message, type: 'success' });
-                setChatMessages([{ type: 'ai', text: 'PDF processed! You can now ask questions about the report.' }]);
-                setSelectedFile(null); // Clear file input
+                if (result.requires_review) {
+                    setReview(result);
+                    setReviewText(result.text);
+                    setChatMessages([{ type: 'ai', text: 'Check the extracted report text, then confirm it to enable questions.' }]);
+                } else {
+                    setReportReady(true);
+                    setChatMessages([{ type: 'ai', text: 'Report processed! You can now ask questions about it.' }]);
+                }
             } else {
                 setUploadStatus({ message: result.error || 'An unknown error occurred during upload.', type: 'error' });
             }
         } catch (error) {
             console.error('Upload error:', error);
-            setUploadStatus({ message: 'Network error or server unreachable.', type: 'error' });
+            setUploadStatus({ message: error.message || 'Network error or server unreachable.', type: 'error' });
         } finally {
             setIsUploading(false);
         }
     };
 
+    const confirmReport = async () => {
+        setIsUploading(true);
+        try {
+            const response = await fetch('/confirm-report', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: reviewText, review_token: review.review_token }),
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || 'Could not confirm report.');
+            setReview(null);
+            setReportReady(true);
+            setUploadStatus({ message: result.message, type: 'success' });
+            setChatMessages([{ type: 'ai', text: 'Reviewed report ready. Ask a question about it.' }]);
+        } catch (error) {
+            setUploadStatus({ message: error.message, type: 'error' });
+        } finally { setIsUploading(false); }
+    };
+
     const handleSendMessage = async () => {
-        if (!question.trim()) return;
+        if (!question.trim() || !reportReady) return;
 
         const userMessage = { type: 'user', text: question.trim() };
         setChatMessages((prevMessages) => [...prevMessages, userMessage]);
@@ -100,7 +185,8 @@ export default function App() {
     // Function to format markdown-like bold headings and newlines
     const formatAnswer = (text) => {
         // Convert markdown bolding to strong tags
-        let formattedText = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        let formattedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
 
         // Convert newlines to <br> tags for basic line breaks
         formattedText = formattedText.replace(/\n/g, '<br>');
@@ -122,7 +208,7 @@ export default function App() {
     };
 
     return (
-        <div className="h-screen w-full bg-gradient-to-br from-slate-900 via-blue-900 to-emerald-900 relative overflow-hidden">
+        <div className="min-h-screen w-full bg-gradient-to-br from-slate-900 via-blue-900 to-emerald-900 relative overflow-hidden">
             {/* The customCss block and <style> tag are removed from here.
                 All CSS is now in frontend/src/index.css and processed by Tailwind. */}
 
@@ -175,7 +261,7 @@ export default function App() {
             </div>
 
             {/* Main Content */}
-            <div className="relative h-[calc(100vh-100px)] p-6 z-10 flex items-center justify-center">
+            <div className="relative min-h-[calc(100vh-100px)] p-6 pb-24 z-10 flex items-center justify-center">
                 <div className="h-full w-full max-w-7xl grid grid-cols-1 lg:grid-cols-2 gap-8">
                     {/* File Upload Section - Integrated Directly */}
                     <div className="flex flex-col p-6 bg-gradient-to-br from-blue-800/30 to-purple-800/30 rounded-3xl shadow-2xl border border-blue-700/50 backdrop-blur-md transform hover:scale-[1.01] transition-transform duration-300 flex-1"> {/* Added flex-1 */}
@@ -184,22 +270,44 @@ export default function App() {
                         </h2>
                         <p className="text-gray-300 mb-6">Upload medical documents for AI-powered analysis and insights</p>
 
-                        <form onSubmit={handleUpload} className="flex flex-col items-center justify-center flex-grow p-8 border-2 border-dashed border-blue-500/50 rounded-xl bg-blue-900/10 hover:bg-blue-900/20 transition-colors cursor-pointer">
+                        <div className="mt-4 text-sm text-gray-200">
+                            <label htmlFor="extraction-mode" className="block mb-2 font-semibold">Report reading method</label>
+                            <select
+                                id="extraction-mode"
+                                value={extractionMode}
+                                disabled={isUploading}
+                                onChange={(event) => setExtractionMode(event.target.value)}
+                                className="w-full rounded-lg bg-gray-900 border border-gray-600 p-3 disabled:opacity-50"
+                            >
+                                <option value="auto">Auto (recommended)</option>
+                                <option value="pdf_text">PDF text only</option>
+                                <option value="ocr">Force OCR</option>
+                            </select>
+                            <p className="mt-2 text-gray-400">
+                                {extractionMode === 'auto' ? 'Automatically reads PDF text and uses OCR for scanned pages or photos.' :
+                                    extractionMode === 'pdf_text' ? 'Reads embedded PDF text. Scanned reports and photos need Auto or Force OCR.' :
+                                    'Uses OCR on every page, including PDFs. Review the extracted text before asking questions.'}
+                                {' '}All methods use RAG to find report passages for your questions. Changes apply to your next upload.
+                            </p>
+                        </div>
+
+                        <form onSubmit={handleUpload} className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-blue-500/50 rounded-xl bg-blue-900/10 hover:bg-blue-900/20 transition-colors cursor-pointer">
                             <UploadCloud className="h-20 w-20 text-blue-400 mb-4" />
                             <p className="text-xl text-blue-300 font-semibold mb-2">Upload Medical Documents</p>
                             <p className="text-sm text-gray-400 text-center mb-6">
-                                Lab reports • X-rays • MRI • CT scans • Medical records<br/>
-                                PDF, DOC, DOCX, TXT, JPG, PNG, DICOM supported
+                                Printed lab reports and medical records<br/>
+                                PDF (including scans), JPG and PNG • Up to 20 MB, 20 pages
                             </p>
                             <input
                                 type="file"
-                                accept=".pdf"
+                                accept=".pdf,.png,.jpg,.jpeg"
+                                disabled={isUploading || isAsking}
                                 onChange={handleFileChange}
                                 className="block w-full text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-500 file:text-white hover:file:bg-indigo-600 cursor-pointer mb-6"
                             />
                             <button
                                 type="submit"
-                                disabled={isUploading || !selectedFile}
+                                disabled={isUploading || isAsking || !selectedFile}
                                 className="w-full py-3 px-6 bg-green-600 hover:bg-green-700 text-white font-bold rounded-full shadow-lg transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                             >
                                 {isUploading ? (
@@ -213,6 +321,29 @@ export default function App() {
                                 )}
                             </button>
                         </form>
+
+                        {review && (
+                            <section className="mt-4 text-gray-200 space-y-3" aria-label="Review extracted report">
+                                <h3 className="font-bold">Review extracted report</h3>
+                                <p className="text-sm">Compare with the original. Check decimal points, units, reference ranges and row alignment. Confidence scores do not guarantee correctness.</p>
+                                {review.low_confidence.length > 0 && (
+                                    <details className="text-sm text-yellow-200">
+                                        <summary>{review.low_confidence.length} text regions need extra attention</summary>
+                                        <ul>{review.low_confidence.map((line, index) => <li key={index}>Page {line.page}: {line.text} ({Math.round(line.confidence * 100)}%)</li>)}</ul>
+                                    </details>
+                                )}
+                                {!sourceUrl ? <p className="text-sm text-yellow-200">The original preview is unavailable after reconnecting. Open your original report separately and compare it with this text before confirming.</p> : selectedFile?.type === 'application/pdf' || selectedFile?.name.toLowerCase().endsWith('.pdf') ? (
+                                    <object data={sourceUrl} type="application/pdf" className="w-full h-64" aria-label="Original report">
+                                        <a href={sourceUrl} target="_blank" rel="noreferrer">Open original report</a>
+                                    </object>
+                                ) : <img src={sourceUrl} alt="Original uploaded report" className="max-h-64 w-full object-contain" />}
+                                <label htmlFor="review-text" className="block text-sm">Corrected report text (cells separated by |)</label>
+                                <textarea id="review-text" value={reviewText} onChange={event => setReviewText(event.target.value)} maxLength={200000} className="w-full h-56 bg-gray-900 border border-gray-600 rounded p-3 text-sm" />
+                                <button type="button" onClick={confirmReport} disabled={isUploading || !reviewText.trim()} className="w-full bg-green-600 rounded-full py-3 disabled:opacity-50">
+                                    {isUploading ? 'Processing...' : 'Confirm reviewed text'}
+                                </button>
+                            </section>
+                        )}
 
                         {uploadStatus.message && (
                             <div className={`mt-4 text-sm text-center ${
@@ -265,12 +396,12 @@ export default function App() {
                                 onChange={(e) => setQuestion(e.target.value)}
                                 onKeyPress={(e) => e.key === 'Enter' && !isAsking && handleSendMessage()}
                                 placeholder="Ask a question about the report..."
-                                disabled={isAsking}
+                                disabled={isAsking || !reportReady || isUploading}
                                 className="flex-grow p-2 bg-transparent text-gray-200 focus:outline-none placeholder-gray-500"
                             />
                             <button
                                 onClick={handleSendMessage}
-                                disabled={isAsking || !question.trim()}
+                                disabled={isAsking || !question.trim() || !reportReady || isUploading}
                                 className="p-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 <Zap className="h-5 w-5" />

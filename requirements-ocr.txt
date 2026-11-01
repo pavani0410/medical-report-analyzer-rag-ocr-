@@ -1,0 +1,5 @@
+rapidocr-onnxruntime>=1.2.3,<2
+PyMuPDF>=1.26.1,<2
+Pillow>=11.0,<13
+# Compatible with the existing Google API dependencies.
+protobuf>=5.29.5,<6

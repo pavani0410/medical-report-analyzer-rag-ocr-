@@ -1,0 +1,34 @@
+ * Serving Flask app 'app'
+ * Debug mode: off
+[Index] Report ready in 0.000s (fast local search; no model download).
+[INFO] User '4259d870-36d8-4338-bfc6-dfa8ab9009c3' received question: 'What is my glucose value and report reference range?'
+[INFO] Formatted answer from Gemini: **Value:**
+- The reported blood glucose level is 98.1 mg/dL
+.
+
+**Standard Limit:**
+- The standard reference range provided for normal glucose is 70 to 100 mg/dL.
+
+**Recommendation:**
+- Not available i...
+[Index] Report ready in 0.000s (fast local search; no model download).
+[INFO] User '4259d870-36d8-4338-bfc6-dfa8ab9009c3' received question: 'What is my glucose value and report reference range?'
+[INFO] Formatted answer from Gemini: **Value:**
+- The glucose level recorded in the report is 98.1 mg/dL.
+
+**Standard Limit:**
+- The standard reference range for glucose specified in the report is 70 - 100 mg/dL.
+
+**Recommendation:**
+- N...
+[Index] Report ready in 0.001s (fast local search; no model download).
+[INFO] User '7ec41e30-a984-4a47-b049-e214d1914ed1' received question: 'how much is my wbc count'
+[INFO] Formatted answer from Gemini: **Value:**
+- The microscopic WBC/Pus Cells count in the report is 2 /hpf.
+
+**Standard Limit:**
+- The standard reference range for normal WBC/Pus Cells is 0 - 5 /hpf.
+
+**Recommendation:**
+- Consult you...
+warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
